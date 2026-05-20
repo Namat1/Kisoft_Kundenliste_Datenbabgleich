@@ -9,7 +9,7 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
 
-APP_VERSION = "2026-05-20 Version 3 - kompakte Abweichungen"
+APP_VERSION = "2026-05-20 Version 4 - kompakte Abweichungen"
 
 
 st.set_page_config(page_title="Kundenlisten Vergleich", layout="wide")
