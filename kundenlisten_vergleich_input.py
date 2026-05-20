@@ -788,4 +788,3 @@ if kisoft_datei and kundenliste_datei:
 
 else:
     st.info("Bitte beide Dateien hochladen.")
-```
