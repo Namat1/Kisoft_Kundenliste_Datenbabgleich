@@ -9,10 +9,11 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
 
-APP_VERSION = "2026-05-20 Version 3 - kompakte Abweichungen"
+# EINDEUTIG NEU: Version 7 / Uploadfelder heißen Kisoft und Kundenliste / kompakte Abweichungen
+APP_VERSION = "2026-05-21 Version 7 - Kisoft gegen Kundenliste"
 
 
-st.set_page_config(page_title="Kundenlisten Vergleich", layout="wide")
+st.set_page_config(page_title="Kisoft gegen Kundenliste", layout="wide")
 
 
 STANDARD_SPALTEN = ["SAP", "CSB", "Kundenname", "Straße", "Postleitzahl", "Ort"]
@@ -271,19 +272,19 @@ def mache_vergleich(kisoft, original):
                         "SAP": sap,
                         "Feld": feld,
                         "Kisoft-Wert": k_erster.at[sap, feld],
-                        "Original-Wert": o_erster.at[sap, feld],
+                        "Kundenliste-Wert": o_erster.at[sap, feld],
                     }
                 )
 
         if not hat_abweichung:
             gleiche += 1
 
-    abweichungen_df = pd.DataFrame(abweichungen, columns=["SAP", "Feld", "Kisoft-Wert", "Original-Wert"])
+    abweichungen_df = pd.DataFrame(abweichungen, columns=["SAP", "Feld", "Kisoft-Wert", "Kundenliste-Wert"])
 
     duplikate_sap = pd.concat(
         [
             kisoft[kisoft.duplicated("SAP", keep=False)].assign(Quelle="Kisoft"),
-            original[original.duplicated("SAP", keep=False)].assign(Quelle="Original"),
+            original[original.duplicated("SAP", keep=False)].assign(Quelle="Kundenliste"),
         ],
         ignore_index=True,
     )
@@ -294,7 +295,7 @@ def mache_vergleich(kisoft, original):
     duplikate_csb = pd.concat(
         [
             kisoft[(kisoft["CSB"] != "") & kisoft.duplicated("CSB", keep=False)].assign(Quelle="Kisoft"),
-            original[(original["CSB"] != "") & original.duplicated("CSB", keep=False)].assign(Quelle="Original"),
+            original[(original["CSB"] != "") & original.duplicated("CSB", keep=False)].assign(Quelle="Kundenliste"),
         ],
         ignore_index=True,
     )
@@ -304,15 +305,15 @@ def mache_vergleich(kisoft, original):
 
     kennzahlen = {
         "Kisoft Zeilen mit SAP": len(kisoft),
-        "Original Zeilen mit SAP": len(original),
+        "Kundenliste Zeilen mit SAP": len(original),
         "Gemeinsame SAP-Nummern": len(gemeinsame_saps),
         "Komplett gleiche gemeinsame SAP-Nummern": gleiche,
         "SAP-Nummern mit echten Abweichungen": len(sap_mit_abweichung),
         "Abweichende Felder gesamt": len(abweichungen_df),
         "Nur in Kisoft - eindeutige SAP": len(nur_k_saps),
         "Nur in Kisoft - Zeilen": len(nur_k),
-        "Nur im Original - eindeutige SAP": len(nur_o_saps),
-        "Nur im Original - Zeilen": len(nur_o),
+        "Nur in Kundenliste - eindeutige SAP": len(nur_o_saps),
+        "Nur in Kundenliste - Zeilen": len(nur_o),
         "Doppelte SAP-Zeilen": len(duplikate_sap),
         "Doppelte CSB-Zeilen": len(duplikate_csb),
     }
@@ -322,7 +323,6 @@ def mache_vergleich(kisoft, original):
 
 def formatiere_arbeitsmappe(workbook):
     dunkel = "1F2937"
-    mittel = "E5E7EB"
     hell = "F9FAFB"
     gelb = "FFF2CC"
     gruen = "E2F0D9"
@@ -355,7 +355,7 @@ def formatiere_arbeitsmappe(workbook):
                     cell.fill = PatternFill("solid", fgColor=hell)
 
         if sheet.title == "Übersicht":
-            sheet["A1"] = "Kundenlisten Vergleich"
+            sheet["A1"] = "Kisoft gegen Kundenliste"
             sheet["B1"] = APP_VERSION
             sheet["A1"].fill = PatternFill("solid", fgColor=dunkel)
             sheet["B1"].fill = PatternFill("solid", fgColor=dunkel)
@@ -399,13 +399,13 @@ def excel_download(kennzahlen, nur_k, nur_o, abweichungen, duplikate_sap, duplik
     with pd.ExcelWriter(ausgabe, engine="openpyxl") as writer:
         uebersicht.to_excel(writer, sheet_name="Übersicht", index=False, startrow=2)
         nur_k.to_excel(writer, sheet_name="Nur in Kisoft", index=False)
-        nur_o.to_excel(writer, sheet_name="Nur im Original", index=False)
+        nur_o.to_excel(writer, sheet_name="Nur in Kundenliste", index=False)
         abweichungen.to_excel(writer, sheet_name="Abweichungen", index=False)
         duplikate_sap.to_excel(writer, sheet_name="Duplikate SAP", index=False)
         duplikate_csb.to_excel(writer, sheet_name="Duplikate CSB", index=False)
         ohne_sap.to_excel(writer, sheet_name="Zeilen ohne SAP", index=False)
         kisoft.to_excel(writer, sheet_name="Kisoft bereinigt", index=False)
-        original.to_excel(writer, sheet_name="Original bereinigt", index=False)
+        original.to_excel(writer, sheet_name="Kundenliste bereinigt", index=False)
 
         formatiere_arbeitsmappe(writer.book)
 
@@ -413,10 +413,10 @@ def excel_download(kennzahlen, nur_k, nur_o, abweichungen, duplikate_sap, duplik
     return ausgabe.getvalue()
 
 
-st.title("Kundenlisten Vergleich")
+st.title("Kisoft gegen Kundenliste")
 st.caption(APP_VERSION)
 st.write(
-    "Lade die Kisoft-Kundenliste und die Original-Kundenliste hoch. "
+    "Lade die Datei Kisoft und die Datei Kundenliste hoch. "
     "Der Vergleich läuft über die SAP-Nummer. Groß- und Kleinschreibung wird nicht als Unterschied gewertet."
 )
 
@@ -426,7 +426,7 @@ with links:
     kisoft_datei = st.file_uploader("Kisoft Datei", type=["csv", "xlsx", "xlsm", "xls"], key="kisoft")
 
 with rechts:
-    original_datei = st.file_uploader("Original Datei", type=["csv", "xlsx", "xlsm", "xls"], key="original")
+    original_datei = st.file_uploader("Kundenliste Datei", type=["csv", "xlsx", "xlsm", "xls"], key="original")
 
 if kisoft_datei and original_datei:
     try:
@@ -434,7 +434,7 @@ if kisoft_datei and original_datei:
         original_roh = lese_datei(original_datei)
 
         kisoft, kisoft_ohne_sap, kisoft_mapping = baue_standard_df(kisoft_roh, "Kisoft")
-        original, original_ohne_sap, original_mapping = baue_standard_df(original_roh, "Original")
+        original, original_ohne_sap, original_mapping = baue_standard_df(original_roh, "Kundenliste")
 
         kennzahlen, nur_k, nur_o, abweichungen, duplikate_sap, duplikate_csb = mache_vergleich(kisoft, original)
         ohne_sap = pd.concat([kisoft_ohne_sap, original_ohne_sap], ignore_index=True)
@@ -442,13 +442,13 @@ if kisoft_datei and original_datei:
         st.subheader("Ergebnis")
         metrik_spalten = st.columns(5)
         metrik_spalten[0].metric("Nur in Kisoft", kennzahlen["Nur in Kisoft - eindeutige SAP"])
-        metrik_spalten[1].metric("Nur im Original", kennzahlen["Nur im Original - eindeutige SAP"])
+        metrik_spalten[1].metric("Nur in Kundenliste", kennzahlen["Nur in Kundenliste - eindeutige SAP"])
         metrik_spalten[2].metric("SAP mit Abweichung", kennzahlen["SAP-Nummern mit echten Abweichungen"])
         metrik_spalten[3].metric("Abweichende Felder", kennzahlen["Abweichende Felder gesamt"])
         metrik_spalten[4].metric("Gleich", kennzahlen["Komplett gleiche gemeinsame SAP-Nummern"])
 
         st.caption("Erkannte Spalten Kisoft: " + ", ".join([f"{k} = {v}" for k, v in kisoft_mapping.items()]))
-        st.caption("Erkannte Spalten Original: " + ", ".join([f"{k} = {v}" for k, v in original_mapping.items()]))
+        st.caption("Erkannte Spalten Kundenliste: " + ", ".join([f"{k} = {v}" for k, v in original_mapping.items()]))
 
         excel = excel_download(
             kennzahlen,
@@ -465,7 +465,7 @@ if kisoft_datei and original_datei:
         st.download_button(
             "Excel-Auswertung herunterladen",
             data=excel,
-            file_name="kundenlisten_unterschiede.xlsx",
+            file_name="kisoft_kundenliste_unterschiede.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -473,7 +473,7 @@ if kisoft_datei and original_datei:
             [
                 "Abweichungen",
                 "Nur in Kisoft",
-                "Nur im Original",
+                "Nur in Kundenliste",
                 "Duplikate SAP",
                 "Duplikate CSB",
                 "Zeilen ohne SAP",
