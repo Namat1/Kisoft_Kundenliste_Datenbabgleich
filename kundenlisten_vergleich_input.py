@@ -1,6 +1,3 @@
-Kopier bitte **den kompletten Code** in deine Datei:
-
-```python
 import io
 import re
 import csv
