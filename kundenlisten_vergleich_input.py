@@ -1,3 +1,6 @@
+Kopier bitte **den kompletten Code** in deine Datei:
+
+```python
 import io
 import re
 import csv
@@ -9,14 +12,14 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
 
-# EINDEUTIG NEU: Version 7 / Uploadfelder heißen Kisoft und Kundenliste / kompakte Abweichungen
-APP_VERSION = "2026-05-21 Version 7 - Kisoft gegen Kundenliste"
+APP_VERSION = "2026-05-21 Version 8 - intelligente Kisoft-Erkennung"
 
 
 st.set_page_config(page_title="Kisoft gegen Kundenliste", layout="wide")
 
 
 STANDARD_SPALTEN = ["SAP", "CSB", "Kundenname", "Straße", "Postleitzahl", "Ort"]
+
 
 SPALTEN_KANDIDATEN = {
     "SAP": [
@@ -28,9 +31,15 @@ SPALTEN_KANDIDATEN = {
         "sap nr debitoren",
         "sap debitoren",
         "sap-nr. debitoren",
+        "kundennummer",
+        "kunden nummer",
     ],
     "CSB": [
         "csb",
+        "csb kundennummer",
+        "csb kunden nummer",
+        "csb nummer",
+        "csb nr",
         "kd nr",
         "kd-nr",
         "kd.-nr",
@@ -41,9 +50,9 @@ SPALTEN_KANDIDATEN = {
     ],
     "Kundenname": [
         "kundenname",
+        "kunden name",
         "name",
         "kunde",
-        "kunden name",
     ],
     "Straße": [
         "straße",
@@ -51,6 +60,7 @@ SPALTEN_KANDIDATEN = {
         "str",
         "str.",
         "anschrift",
+        "adresse",
     ],
     "Postleitzahl": [
         "postleitzahl",
@@ -66,6 +76,7 @@ SPALTEN_KANDIDATEN = {
 def text_wert(wert):
     if pd.isna(wert):
         return ""
+
     text = str(wert).replace("\u00a0", " ").strip()
     text = re.sub(r"\s+", " ", text)
     return text
@@ -73,14 +84,31 @@ def text_wert(wert):
 
 def nummer_wert(wert):
     text = text_wert(wert)
+
     if re.fullmatch(r"\d+\.0", text):
         text = text[:-2]
+
     text = re.sub(r"\s+", "", text)
     return text
 
 
+def sap_wert(wert):
+    """
+    SAP-Nummern aus Kisoft können führende Nullen haben.
+    Beispiel: 0000213003 wird zu 213003.
+    """
+    text = nummer_wert(wert)
+
+    if re.fullmatch(r"\d+", text):
+        text = text.lstrip("0") or "0"
+
+    return text
+
+
 def vergleich_text(wert):
-    """Vergleich ohne Beachtung von Groß- und Kleinschreibung."""
+    """
+    Vergleich ohne Beachtung von Groß- und Kleinschreibung.
+    """
     text = text_wert(wert)
     text = text.casefold()
     text = re.sub(r"\s+", " ", text).strip()
@@ -105,39 +133,158 @@ def sortier_sap(wert):
     return (0, int(text)) if text.isdigit() else (1, text)
 
 
-def finde_spalte(df, ziel):
-    vorhandene = {kopf_normalisieren(spalte): spalte for spalte in df.columns}
-    kandidaten = kandidaten_normalisieren(SPALTEN_KANDIDATEN[ziel])
+def finde_spalte(tabelle, ziel, quelle=""):
+    """
+    Intelligente Spaltenerkennung.
 
-    for kandidat in kandidaten:
-        if kandidat in vorhandene:
-            return vorhandene[kandidat]
+    Wichtig für Kisoft:
+    - Kundennummer ist meistens die SAP-Nummer.
+    - CSB Kundennummer ist die CSB-Nummer.
 
-    for norm, original in vorhandene.items():
-        if ziel == "SAP" and "sap" in norm:
-            return original
-        if ziel == "CSB" and (norm == "csb" or "kd nr" in norm or "kunden nr" in norm):
-            return original
-        if ziel == "Straße" and ("strasse" in norm or norm == "str"):
-            return original
-        if ziel == "Postleitzahl" and ("plz" in norm or "postleitzahl" in norm):
-            return original
-        if ziel == "Kundenname" and norm in {"name", "kundenname", "kunde"}:
-            return original
-        if ziel == "Ort" and norm == "ort":
-            return original
+    Wichtig für Kundenliste:
+    - SAP-Nr oder SAP ist die SAP-Nummer.
+    - Kd.-Nr oder Kundennummer kann die CSB-Nummer sein.
+    """
+    quelle_normalisiert = quelle.casefold()
+    spalten = list(tabelle.columns)
+    norm_spalten = [(kopf_normalisieren(spalte), spalte) for spalte in spalten]
+
+    def erste_spalte_wenn(bedingung, ausgeschlossene_spalten=None):
+        ausgeschlossene_spalten = set(ausgeschlossene_spalten or [])
+
+        for normalisiert, original in norm_spalten:
+            if original in ausgeschlossene_spalten:
+                continue
+
+            if bedingung(normalisiert):
+                return original
+
+        return None
+
+    if ziel == "SAP":
+        treffer = erste_spalte_wenn(lambda name: "sap" in name)
+        if treffer:
+            return treffer
+
+        treffer = erste_spalte_wenn(
+            lambda name: (
+                name in {"kundennummer", "kunden nummer", "kundennr"}
+                or (
+                    ("kunden" in name or "kunde" in name)
+                    and "nummer" in name
+                    and "csb" not in name
+                    and "kd nr" not in name
+                )
+            )
+        )
+        if treffer:
+            return treffer
+
+        kandidaten = []
+
+        for normalisiert, original in norm_spalten:
+            if "csb" in normalisiert:
+                continue
+
+            if "nummer" in normalisiert or "nr" in normalisiert:
+                serie = tabelle[original].dropna().map(nummer_wert).head(80)
+
+                if serie.empty:
+                    continue
+
+                zahlen_anteil = serie.map(lambda x: bool(re.fullmatch(r"\d+", x))).mean()
+                mittlere_laenge = serie.map(len).median()
+
+                kandidaten.append((zahlen_anteil, mittlere_laenge, original))
+
+        if kandidaten:
+            kandidaten.sort(reverse=True)
+            return kandidaten[0][2]
+
+    if ziel == "CSB":
+        treffer = erste_spalte_wenn(
+            lambda name: (
+                "csb" in name
+                and "a z" not in name
+                and "az" not in name
+            )
+        )
+        if treffer:
+            return treffer
+
+        treffer = erste_spalte_wenn(
+            lambda name: name in {
+                "kd nr",
+                "kd nummer",
+                "kdnr",
+                "kd nr debitoren",
+                "kunden nr",
+                "kunden nummer",
+                "kundennummer",
+            }
+        )
+        if treffer:
+            return treffer
+
+        treffer = erste_spalte_wenn(
+            lambda name: "kd" in name and ("nr" in name or "nummer" in name)
+        )
+        if treffer:
+            return treffer
+
+        if "kisoft" in quelle_normalisiert:
+            treffer = erste_spalte_wenn(
+                lambda name: "csb" in name and "kund" in name
+            )
+            if treffer:
+                return treffer
+
+    if ziel == "Kundenname":
+        return erste_spalte_wenn(
+            lambda name: (
+                name in {"kundenname", "kunden name", "name", "kunde"}
+                or "kundenname" in name
+                or "kunden name" in name
+            )
+        )
+
+    if ziel == "Straße":
+        return erste_spalte_wenn(
+            lambda name: (
+                name in {"strasse", "str", "strasse hausnummer", "anschrift", "adresse"}
+                or "strasse" in name
+                or "straße" in name
+                or "anschrift" in name
+                or "adresse" in name
+            )
+        )
+
+    if ziel == "Postleitzahl":
+        return erste_spalte_wenn(
+            lambda name: (
+                name in {"postleitzahl", "plz"}
+                or "postleitzahl" in name
+                or name == "plz"
+            )
+        )
+
+    if ziel == "Ort":
+        return erste_spalte_wenn(
+            lambda name: name in {"ort", "stadt"} or name.endswith(" ort")
+        )
 
     return None
 
 
 def lese_csv(datei):
-    roh = datei.getvalue()
+    rohdaten = datei.getvalue()
     letzter_fehler = None
 
     for encoding in ["utf-8-sig", "utf-8", "cp1252", "latin1"]:
         try:
-            text = roh.decode(encoding)
+            text = rohdaten.decode(encoding)
             probe = text[:8192]
+
             try:
                 dialect = csv.Sniffer().sniff(probe, delimiters=";,|\t,")
                 trenner = dialect.delimiter
@@ -155,30 +302,38 @@ def lese_excel(datei):
     excel = pd.ExcelFile(datei)
 
     bevorzugte_blaetter = []
+
     for blatt in excel.sheet_names:
         if "liste" in blatt.lower():
             bevorzugte_blaetter.append(blatt)
 
-    bevorzugte_blaetter.extend([blatt for blatt in excel.sheet_names if blatt not in bevorzugte_blaetter])
+    bevorzugte_blaetter.extend(
+        [blatt for blatt in excel.sheet_names if blatt not in bevorzugte_blaetter]
+    )
 
-    beste_df = None
-    beste_blatt = None
+    beste_tabelle = None
+    bestes_blatt = None
     beste_treffer = -1
 
     for blatt in bevorzugte_blaetter:
-        df = pd.read_excel(excel, sheet_name=blatt, dtype=str)
-        treffer = sum(1 for ziel in STANDARD_SPALTEN if finde_spalte(df, ziel) is not None)
+        tabelle = pd.read_excel(excel, sheet_name=blatt, dtype=str)
+
+        treffer = sum(
+            1
+            for ziel in STANDARD_SPALTEN
+            if finde_spalte(tabelle, ziel) is not None
+        )
 
         if treffer > beste_treffer:
             beste_treffer = treffer
-            beste_df = df
-            beste_blatt = blatt
+            beste_tabelle = tabelle
+            bestes_blatt = blatt
 
-    if beste_df is None or beste_treffer < 4:
+    if beste_tabelle is None or beste_treffer < 4:
         raise ValueError("In der Excel-Datei wurden nicht genug passende Spalten gefunden.")
 
-    st.caption(f"Excel-Blatt verwendet: {beste_blatt}")
-    return beste_df
+    st.caption(f"Excel-Blatt verwendet: {bestes_blatt}")
+    return beste_tabelle
 
 
 def lese_datei(datei):
@@ -193,63 +348,68 @@ def lese_datei(datei):
     raise ValueError("Bitte CSV oder Excel hochladen.")
 
 
-def baue_standard_df(df, quelle):
+def baue_standard_tabelle(tabelle, quelle):
     zuordnung = OrderedDict()
     fehlend = []
 
     for ziel in STANDARD_SPALTEN:
-        spalte = finde_spalte(df, ziel)
+        spalte = finde_spalte(tabelle, ziel, quelle)
+
         if spalte is None:
             fehlend.append(ziel)
         else:
             zuordnung[ziel] = spalte
 
     if fehlend:
-        raise ValueError(f"{quelle}: Diese Spalten wurden nicht gefunden: {', '.join(fehlend)}")
+        raise ValueError(
+            f"{quelle}: Diese Spalten wurden nicht gefunden: {', '.join(fehlend)}"
+        )
 
-    out = pd.DataFrame()
-    out["SAP"] = df[zuordnung["SAP"]].map(nummer_wert)
-    out["CSB"] = df[zuordnung["CSB"]].map(nummer_wert)
-    out["Kundenname"] = df[zuordnung["Kundenname"]].map(text_wert)
-    out["Straße"] = df[zuordnung["Straße"]].map(text_wert)
-    out["Postleitzahl"] = df[zuordnung["Postleitzahl"]].map(nummer_wert)
-    out["Ort"] = df[zuordnung["Ort"]].map(text_wert)
+    ausgabe = pd.DataFrame()
+    ausgabe["SAP"] = tabelle[zuordnung["SAP"]].map(sap_wert)
+    ausgabe["CSB"] = tabelle[zuordnung["CSB"]].map(nummer_wert)
+    ausgabe["Kundenname"] = tabelle[zuordnung["Kundenname"]].map(text_wert)
+    ausgabe["Straße"] = tabelle[zuordnung["Straße"]].map(text_wert)
+    ausgabe["Postleitzahl"] = tabelle[zuordnung["Postleitzahl"]].map(nummer_wert)
+    ausgabe["Ort"] = tabelle[zuordnung["Ort"]].map(text_wert)
 
-    ohne_sap = out[out["SAP"] == ""].copy()
+    ohne_sap = ausgabe[ausgabe["SAP"] == ""].copy()
     ohne_sap.insert(0, "Quelle", quelle)
 
-    out = out[out["SAP"] != ""].copy()
-    out = out.reset_index(drop=True)
+    ausgabe = ausgabe[ausgabe["SAP"] != ""].copy()
+    ausgabe = ausgabe.reset_index(drop=True)
 
-    return out, ohne_sap, zuordnung
+    return ausgabe, ohne_sap, zuordnung
 
 
-def vergleichsschluessel(df):
-    temp = df.copy()
+def vergleichsschluessel(tabelle):
+    temp = tabelle.copy()
+
     temp["_CSB"] = temp["CSB"].map(nummer_wert)
     temp["_Kundenname"] = temp["Kundenname"].map(vergleich_text)
     temp["_Straße"] = temp["Straße"].map(vergleich_text)
     temp["_Postleitzahl"] = temp["Postleitzahl"].map(nummer_wert)
     temp["_Ort"] = temp["Ort"].map(vergleich_text)
+
     return temp
 
 
-def mache_vergleich(kisoft, original):
-    k_saps = set(kisoft["SAP"])
-    o_saps = set(original["SAP"])
+def mache_vergleich(kisoft, kundenliste):
+    kisoft_saps = set(kisoft["SAP"])
+    kundenliste_saps = set(kundenliste["SAP"])
 
-    nur_k_saps = sorted(k_saps - o_saps, key=sortier_sap)
-    nur_o_saps = sorted(o_saps - k_saps, key=sortier_sap)
-    gemeinsame_saps = sorted(k_saps & o_saps, key=sortier_sap)
+    nur_kisoft_saps = sorted(kisoft_saps - kundenliste_saps, key=sortier_sap)
+    nur_kundenliste_saps = sorted(kundenliste_saps - kisoft_saps, key=sortier_sap)
+    gemeinsame_saps = sorted(kisoft_saps & kundenliste_saps, key=sortier_sap)
 
-    nur_k = kisoft[kisoft["SAP"].isin(nur_k_saps)].sort_values("SAP").copy()
-    nur_o = original[original["SAP"].isin(nur_o_saps)].sort_values("SAP").copy()
+    nur_kisoft = kisoft[kisoft["SAP"].isin(nur_kisoft_saps)].sort_values("SAP").copy()
+    nur_kundenliste = kundenliste[kundenliste["SAP"].isin(nur_kundenliste_saps)].sort_values("SAP").copy()
 
-    k_erster = kisoft.drop_duplicates("SAP", keep="first").set_index("SAP")
-    o_erster = original.drop_duplicates("SAP", keep="first").set_index("SAP")
+    kisoft_eindeutig = kisoft.drop_duplicates("SAP", keep="first").set_index("SAP")
+    kundenliste_eindeutig = kundenliste.drop_duplicates("SAP", keep="first").set_index("SAP")
 
-    k_v = vergleichsschluessel(k_erster.reset_index()).set_index("SAP")
-    o_v = vergleichsschluessel(o_erster.reset_index()).set_index("SAP")
+    kisoft_vergleich = vergleichsschluessel(kisoft_eindeutig.reset_index()).set_index("SAP")
+    kundenliste_vergleich = vergleichsschluessel(kundenliste_eindeutig.reset_index()).set_index("SAP")
 
     abweichungen = []
     gleiche = 0
@@ -263,7 +423,10 @@ def mache_vergleich(kisoft, original):
         for feld in prueffelder:
             vergleichsspalte = "_" + feld
 
-            if str(k_v.at[sap, vergleichsspalte]) != str(o_v.at[sap, vergleichsspalte]):
+            kisoft_wert = str(kisoft_vergleich.at[sap, vergleichsspalte])
+            kundenliste_wert = str(kundenliste_vergleich.at[sap, vergleichsspalte])
+
+            if kisoft_wert != kundenliste_wert:
                 hat_abweichung = True
                 sap_mit_abweichung.add(sap)
 
@@ -271,141 +434,207 @@ def mache_vergleich(kisoft, original):
                     {
                         "SAP": sap,
                         "Feld": feld,
-                        "Kisoft-Wert": k_erster.at[sap, feld],
-                        "Kundenliste-Wert": o_erster.at[sap, feld],
+                        "Kisoft-Wert": kisoft_eindeutig.at[sap, feld],
+                        "Kundenliste-Wert": kundenliste_eindeutig.at[sap, feld],
                     }
                 )
 
         if not hat_abweichung:
             gleiche += 1
 
-    abweichungen_df = pd.DataFrame(abweichungen, columns=["SAP", "Feld", "Kisoft-Wert", "Kundenliste-Wert"])
+    abweichungen_tabelle = pd.DataFrame(
+        abweichungen,
+        columns=["SAP", "Feld", "Kisoft-Wert", "Kundenliste-Wert"],
+    )
 
     duplikate_sap = pd.concat(
         [
             kisoft[kisoft.duplicated("SAP", keep=False)].assign(Quelle="Kisoft"),
-            original[original.duplicated("SAP", keep=False)].assign(Quelle="Kundenliste"),
+            kundenliste[kundenliste.duplicated("SAP", keep=False)].assign(Quelle="Kundenliste"),
         ],
         ignore_index=True,
     )
 
     if not duplikate_sap.empty:
-        duplikate_sap = duplikate_sap[["Quelle"] + STANDARD_SPALTEN].sort_values(["SAP", "Quelle"])
+        duplikate_sap = duplikate_sap[["Quelle"] + STANDARD_SPALTEN].sort_values(
+            ["SAP", "Quelle"]
+        )
 
     duplikate_csb = pd.concat(
         [
-            kisoft[(kisoft["CSB"] != "") & kisoft.duplicated("CSB", keep=False)].assign(Quelle="Kisoft"),
-            original[(original["CSB"] != "") & original.duplicated("CSB", keep=False)].assign(Quelle="Kundenliste"),
+            kisoft[
+                (kisoft["CSB"] != "") & kisoft.duplicated("CSB", keep=False)
+            ].assign(Quelle="Kisoft"),
+            kundenliste[
+                (kundenliste["CSB"] != "") & kundenliste.duplicated("CSB", keep=False)
+            ].assign(Quelle="Kundenliste"),
         ],
         ignore_index=True,
     )
 
     if not duplikate_csb.empty:
-        duplikate_csb = duplikate_csb[["Quelle"] + STANDARD_SPALTEN].sort_values(["CSB", "Quelle", "SAP"])
+        duplikate_csb = duplikate_csb[["Quelle"] + STANDARD_SPALTEN].sort_values(
+            ["CSB", "Quelle", "SAP"]
+        )
 
     kennzahlen = {
         "Kisoft Zeilen mit SAP": len(kisoft),
-        "Kundenliste Zeilen mit SAP": len(original),
+        "Kundenliste Zeilen mit SAP": len(kundenliste),
         "Gemeinsame SAP-Nummern": len(gemeinsame_saps),
         "Komplett gleiche gemeinsame SAP-Nummern": gleiche,
         "SAP-Nummern mit echten Abweichungen": len(sap_mit_abweichung),
-        "Abweichende Felder gesamt": len(abweichungen_df),
-        "Nur in Kisoft - eindeutige SAP": len(nur_k_saps),
-        "Nur in Kisoft - Zeilen": len(nur_k),
-        "Nur in Kundenliste - eindeutige SAP": len(nur_o_saps),
-        "Nur in Kundenliste - Zeilen": len(nur_o),
+        "Abweichende Felder gesamt": len(abweichungen_tabelle),
+        "Nur in Kisoft - eindeutige SAP": len(nur_kisoft_saps),
+        "Nur in Kisoft - Zeilen": len(nur_kisoft),
+        "Nur in Kundenliste - eindeutige SAP": len(nur_kundenliste_saps),
+        "Nur in Kundenliste - Zeilen": len(nur_kundenliste),
         "Doppelte SAP-Zeilen": len(duplikate_sap),
         "Doppelte CSB-Zeilen": len(duplikate_csb),
     }
 
-    return kennzahlen, nur_k, nur_o, abweichungen_df, duplikate_sap, duplikate_csb
+    return (
+        kennzahlen,
+        nur_kisoft,
+        nur_kundenliste,
+        abweichungen_tabelle,
+        duplikate_sap,
+        duplikate_csb,
+    )
 
 
-def formatiere_arbeitsmappe(workbook):
+def formatiere_arbeitsmappe(arbeitsmappe):
     dunkel = "1F2937"
     hell = "F9FAFB"
     gelb = "FFF2CC"
     gruen = "E2F0D9"
     rot = "FCE4D6"
+    blau = "D9EAF7"
 
-    header_fill = PatternFill("solid", fgColor=dunkel)
-    header_font = Font(color="FFFFFF", bold=True)
-    thin = Side(style="thin", color="D1D5DB")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    kopf_fuellung = PatternFill("solid", fgColor=dunkel)
+    kopf_schrift = Font(color="FFFFFF", bold=True)
+    duenne_linie = Side(style="thin", color="D1D5DB")
+    rahmen = Border(
+        left=duenne_linie,
+        right=duenne_linie,
+        top=duenne_linie,
+        bottom=duenne_linie,
+    )
 
-    for sheet in workbook.worksheets:
-        sheet.sheet_view.showGridLines = False
-        sheet.freeze_panes = "A2"
+    for blatt in arbeitsmappe.worksheets:
+        blatt.sheet_view.showGridLines = False
 
-        max_row = sheet.max_row
-        max_col = sheet.max_column
+        maximale_zeile = blatt.max_row
+        maximale_spalte = blatt.max_column
 
-        for cell in sheet[1]:
-            cell.fill = header_fill
-            cell.font = header_font
-            cell.alignment = Alignment(horizontal="center", vertical="center")
-            cell.border = border
+        if blatt.title == "Übersicht":
+            blatt["A1"] = "Kisoft gegen Kundenliste"
+            blatt["B1"] = APP_VERSION
 
-        for row in sheet.iter_rows(min_row=2, max_row=max_row, max_col=max_col):
-            for cell in row:
-                cell.border = border
-                cell.alignment = Alignment(vertical="top", wrap_text=True)
+            for zelle in ["A1", "B1"]:
+                blatt[zelle].fill = kopf_fuellung
+                blatt[zelle].font = Font(color="FFFFFF", bold=True, size=13)
+                blatt[zelle].alignment = Alignment(horizontal="center")
 
-                if cell.row % 2 == 0:
-                    cell.fill = PatternFill("solid", fgColor=hell)
+            kopfzeile = 3
+            blatt.freeze_panes = "A4"
+        else:
+            kopfzeile = 1
+            blatt.freeze_panes = "A2"
 
-        if sheet.title == "Übersicht":
-            sheet["A1"] = "Kisoft gegen Kundenliste"
-            sheet["B1"] = APP_VERSION
-            sheet["A1"].fill = PatternFill("solid", fgColor=dunkel)
-            sheet["B1"].fill = PatternFill("solid", fgColor=dunkel)
-            sheet["A1"].font = Font(color="FFFFFF", bold=True, size=14)
-            sheet["B1"].font = Font(color="FFFFFF", bold=True)
+        for zelle in blatt[kopfzeile]:
+            zelle.fill = kopf_fuellung
+            zelle.font = kopf_schrift
+            zelle.alignment = Alignment(horizontal="center", vertical="center")
+            zelle.border = rahmen
 
-            for row in range(3, max_row + 1):
-                key = str(sheet.cell(row=row, column=1).value or "")
-                if "Abweich" in key:
-                    sheet.cell(row=row, column=1).fill = PatternFill("solid", fgColor=gelb)
-                    sheet.cell(row=row, column=2).fill = PatternFill("solid", fgColor=gelb)
-                elif "Nur in" in key:
-                    sheet.cell(row=row, column=1).fill = PatternFill("solid", fgColor=rot)
-                    sheet.cell(row=row, column=2).fill = PatternFill("solid", fgColor=rot)
-                elif "Gleich" in key:
-                    sheet.cell(row=row, column=1).fill = PatternFill("solid", fgColor=gruen)
-                    sheet.cell(row=row, column=2).fill = PatternFill("solid", fgColor=gruen)
+        for zeile in blatt.iter_rows(
+            min_row=kopfzeile + 1,
+            max_row=maximale_zeile,
+            max_col=maximale_spalte,
+        ):
+            for zelle in zeile:
+                zelle.border = rahmen
+                zelle.alignment = Alignment(vertical="top", wrap_text=True)
 
-        for col_idx in range(1, max_col + 1):
-            col_letter = get_column_letter(col_idx)
-            max_length = 0
+                if zelle.row % 2 == 0:
+                    zelle.fill = PatternFill("solid", fgColor=hell)
 
-            for row_idx in range(1, min(max_row, 500) + 1):
-                value = sheet.cell(row=row_idx, column=col_idx).value
-                if value is not None:
-                    max_length = max(max_length, len(str(value)))
+        if blatt.title == "Übersicht":
+            for zeilennummer in range(4, maximale_zeile + 1):
+                pruefung = str(blatt.cell(row=zeilennummer, column=1).value or "")
 
-            width = min(max(max_length + 2, 12), 55)
-            sheet.column_dimensions[col_letter].width = width
+                if "Abweich" in pruefung:
+                    farbe = gelb
+                elif "Nur in" in pruefung:
+                    farbe = rot
+                elif "Gleich" in pruefung or "Gemeinsame" in pruefung:
+                    farbe = gruen
+                elif "Zeilen" in pruefung:
+                    farbe = blau
+                else:
+                    farbe = None
 
-        if max_row >= 1 and max_col >= 1:
-            sheet.auto_filter.ref = sheet.dimensions
+                if farbe:
+                    blatt.cell(row=zeilennummer, column=1).fill = PatternFill(
+                        "solid", fgColor=farbe
+                    )
+                    blatt.cell(row=zeilennummer, column=2).fill = PatternFill(
+                        "solid", fgColor=farbe
+                    )
+
+        for spaltennummer in range(1, maximale_spalte + 1):
+            spaltenbuchstabe = get_column_letter(spaltennummer)
+            maximale_laenge = 0
+
+            for zeilennummer in range(1, min(maximale_zeile, 500) + 1):
+                wert = blatt.cell(row=zeilennummer, column=spaltennummer).value
+
+                if wert is not None:
+                    maximale_laenge = max(maximale_laenge, len(str(wert)))
+
+            breite = min(max(maximale_laenge + 2, 12), 55)
+            blatt.column_dimensions[spaltenbuchstabe].width = breite
+
+        if maximale_zeile >= kopfzeile and maximale_spalte >= 1:
+            blatt.auto_filter.ref = blatt.dimensions
 
 
-def excel_download(kennzahlen, nur_k, nur_o, abweichungen, duplikate_sap, duplikate_csb, ohne_sap, kisoft, original):
+def excel_download(
+    kennzahlen,
+    nur_kisoft,
+    nur_kundenliste,
+    abweichungen,
+    duplikate_sap,
+    duplikate_csb,
+    ohne_sap,
+    kisoft,
+    kundenliste,
+):
     ausgabe = io.BytesIO()
 
-    uebersicht = pd.DataFrame({"Prüfung": list(kennzahlen.keys()), "Wert": list(kennzahlen.values())})
-    uebersicht.index = uebersicht.index + 1
+    uebersicht = pd.DataFrame(
+        {
+            "Prüfung": list(kennzahlen.keys()),
+            "Wert": list(kennzahlen.values()),
+        }
+    )
 
     with pd.ExcelWriter(ausgabe, engine="openpyxl") as writer:
-        uebersicht.to_excel(writer, sheet_name="Übersicht", index=False, startrow=2)
-        nur_k.to_excel(writer, sheet_name="Nur in Kisoft", index=False)
-        nur_o.to_excel(writer, sheet_name="Nur in Kundenliste", index=False)
+        uebersicht.to_excel(
+            writer,
+            sheet_name="Übersicht",
+            index=False,
+            startrow=2,
+        )
+
+        nur_kisoft.to_excel(writer, sheet_name="Nur in Kisoft", index=False)
+        nur_kundenliste.to_excel(writer, sheet_name="Nur in Kundenliste", index=False)
         abweichungen.to_excel(writer, sheet_name="Abweichungen", index=False)
         duplikate_sap.to_excel(writer, sheet_name="Duplikate SAP", index=False)
         duplikate_csb.to_excel(writer, sheet_name="Duplikate CSB", index=False)
         ohne_sap.to_excel(writer, sheet_name="Zeilen ohne SAP", index=False)
-        kisoft.to_excel(writer, sheet_name="Kisoft bereinigt", index=False)
-        original.to_excel(writer, sheet_name="Kundenliste bereinigt", index=False)
+        kisoft.to_excel(writer, sheet_name="Kisoft aufbereitet", index=False)
+        kundenliste.to_excel(writer, sheet_name="Kundenliste aufbereitet", index=False)
 
         formatiere_arbeitsmappe(writer.book)
 
@@ -415,51 +644,110 @@ def excel_download(kennzahlen, nur_k, nur_o, abweichungen, duplikate_sap, duplik
 
 st.title("Kisoft gegen Kundenliste")
 st.caption(APP_VERSION)
+
 st.write(
     "Lade die Datei Kisoft und die Datei Kundenliste hoch. "
-    "Der Vergleich läuft über die SAP-Nummer. Groß- und Kleinschreibung wird nicht als Unterschied gewertet."
+    "Der Vergleich läuft über die SAP-Nummer. "
+    "Groß- und Kleinschreibung wird nicht als Unterschied gewertet. "
+    "Kisoft wird intelligent erkannt, auch wenn die Spalten anders heißen."
 )
 
 links, rechts = st.columns(2)
 
 with links:
-    kisoft_datei = st.file_uploader("Kisoft Datei", type=["csv", "xlsx", "xlsm", "xls"], key="kisoft")
+    kisoft_datei = st.file_uploader(
+        "Kisoft Datei",
+        type=["csv", "xlsx", "xlsm", "xls"],
+        key="kisoft",
+    )
 
 with rechts:
-    original_datei = st.file_uploader("Kundenliste Datei", type=["csv", "xlsx", "xlsm", "xls"], key="original")
+    kundenliste_datei = st.file_uploader(
+        "Kundenliste Datei",
+        type=["csv", "xlsx", "xlsm", "xls"],
+        key="kundenliste",
+    )
 
-if kisoft_datei and original_datei:
+if kisoft_datei and kundenliste_datei:
     try:
         kisoft_roh = lese_datei(kisoft_datei)
-        original_roh = lese_datei(original_datei)
+        kundenliste_roh = lese_datei(kundenliste_datei)
 
-        kisoft, kisoft_ohne_sap, kisoft_mapping = baue_standard_df(kisoft_roh, "Kisoft")
-        original, original_ohne_sap, original_mapping = baue_standard_df(original_roh, "Kundenliste")
+        kisoft, kisoft_ohne_sap, kisoft_mapping = baue_standard_tabelle(
+            kisoft_roh,
+            "Kisoft",
+        )
 
-        kennzahlen, nur_k, nur_o, abweichungen, duplikate_sap, duplikate_csb = mache_vergleich(kisoft, original)
-        ohne_sap = pd.concat([kisoft_ohne_sap, original_ohne_sap], ignore_index=True)
+        kundenliste, kundenliste_ohne_sap, kundenliste_mapping = baue_standard_tabelle(
+            kundenliste_roh,
+            "Kundenliste",
+        )
+
+        (
+            kennzahlen,
+            nur_kisoft,
+            nur_kundenliste,
+            abweichungen,
+            duplikate_sap,
+            duplikate_csb,
+        ) = mache_vergleich(kisoft, kundenliste)
+
+        ohne_sap = pd.concat(
+            [kisoft_ohne_sap, kundenliste_ohne_sap],
+            ignore_index=True,
+        )
 
         st.subheader("Ergebnis")
-        metrik_spalten = st.columns(5)
-        metrik_spalten[0].metric("Nur in Kisoft", kennzahlen["Nur in Kisoft - eindeutige SAP"])
-        metrik_spalten[1].metric("Nur in Kundenliste", kennzahlen["Nur in Kundenliste - eindeutige SAP"])
-        metrik_spalten[2].metric("SAP mit Abweichung", kennzahlen["SAP-Nummern mit echten Abweichungen"])
-        metrik_spalten[3].metric("Abweichende Felder", kennzahlen["Abweichende Felder gesamt"])
-        metrik_spalten[4].metric("Gleich", kennzahlen["Komplett gleiche gemeinsame SAP-Nummern"])
 
-        st.caption("Erkannte Spalten Kisoft: " + ", ".join([f"{k} = {v}" for k, v in kisoft_mapping.items()]))
-        st.caption("Erkannte Spalten Kundenliste: " + ", ".join([f"{k} = {v}" for k, v in original_mapping.items()]))
+        metrik_spalten = st.columns(5)
+
+        metrik_spalten[0].metric(
+            "Nur in Kisoft",
+            kennzahlen["Nur in Kisoft - eindeutige SAP"],
+        )
+
+        metrik_spalten[1].metric(
+            "Nur in Kundenliste",
+            kennzahlen["Nur in Kundenliste - eindeutige SAP"],
+        )
+
+        metrik_spalten[2].metric(
+            "SAP mit Abweichung",
+            kennzahlen["SAP-Nummern mit echten Abweichungen"],
+        )
+
+        metrik_spalten[3].metric(
+            "Abweichende Felder",
+            kennzahlen["Abweichende Felder gesamt"],
+        )
+
+        metrik_spalten[4].metric(
+            "Gleich",
+            kennzahlen["Komplett gleiche gemeinsame SAP-Nummern"],
+        )
+
+        st.caption(
+            "Erkannte Spalten Kisoft: "
+            + ", ".join([f"{ziel} = {spalte}" for ziel, spalte in kisoft_mapping.items()])
+        )
+
+        st.caption(
+            "Erkannte Spalten Kundenliste: "
+            + ", ".join(
+                [f"{ziel} = {spalte}" for ziel, spalte in kundenliste_mapping.items()]
+            )
+        )
 
         excel = excel_download(
             kennzahlen,
-            nur_k,
-            nur_o,
+            nur_kisoft,
+            nur_kundenliste,
             abweichungen,
             duplikate_sap,
             duplikate_csb,
             ohne_sap,
             kisoft,
-            original,
+            kundenliste,
         )
 
         st.download_button(
@@ -484,10 +772,10 @@ if kisoft_datei and original_datei:
             st.dataframe(abweichungen, use_container_width=True, hide_index=True)
 
         with tab2:
-            st.dataframe(nur_k, use_container_width=True, hide_index=True)
+            st.dataframe(nur_kisoft, use_container_width=True, hide_index=True)
 
         with tab3:
-            st.dataframe(nur_o, use_container_width=True, hide_index=True)
+            st.dataframe(nur_kundenliste, use_container_width=True, hide_index=True)
 
         with tab4:
             st.dataframe(duplikate_sap, use_container_width=True, hide_index=True)
@@ -500,5 +788,7 @@ if kisoft_datei and original_datei:
 
     except Exception as fehler:
         st.error(str(fehler))
+
 else:
     st.info("Bitte beide Dateien hochladen.")
+```
